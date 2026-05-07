@@ -3,14 +3,14 @@ CEO Agent — FastAPI web dashboard.
 """
 
 import uuid
-import threading
+import asyncio
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional
 
-from config import PORT, COMPANY_NAME, CEO_NAME
+from config import PORT, COMPANY_NAME, CEO_NAME, TELEGRAM_BOT_TOKEN
 from agent import run_skill, chat, clear_memory
 from skills.prompts import SKILL_MAP
 from database import init_db, log_interaction, get_audit_log, get_metrics, get_audit_entry
@@ -18,13 +18,43 @@ from database import init_db, log_interaction, get_audit_log, get_metrics, get_a
 app = FastAPI(title=f"{COMPANY_NAME} CEO Agent", version="1.0.0")
 _sessions: dict[str, list] = {}
 _jobs: dict[str, dict] = {}
+_tg_app = None
 
 
 @app.on_event("startup")
-def startup():
+async def startup():
+    global _tg_app
     init_db()
     from scheduler import start_scheduler
     start_scheduler()
+
+    if TELEGRAM_BOT_TOKEN:
+        from telegram_bot import build_application
+        import os
+        _tg_app = build_application()
+        await _tg_app.initialize()
+        webhook_url = os.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+        if webhook_url:
+            await _tg_app.bot.set_webhook(f"https://{webhook_url}/telegram/webhook")
+        await _tg_app.start()
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    if _tg_app:
+        await _tg_app.stop()
+        await _tg_app.shutdown()
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    if not _tg_app:
+        return {"ok": False}
+    from telegram import Update
+    data = await request.json()
+    update = Update.de_json(data, _tg_app.bot)
+    await _tg_app.process_update(update)
+    return {"ok": True}
 
 SKILL_ICONS = {
     "daily-briefing": "sunrise", "decision-support": "git-branch",
@@ -520,16 +550,6 @@ def metrics():
     }
 
 
-def start_telegram():
-    try:
-        from telegram_bot import run_bot
-        run_bot()
-    except Exception as e:
-        print(f"Telegram bot error: {e}")
-
-
 if __name__ == "__main__":
     import uvicorn
-    t = threading.Thread(target=start_telegram, daemon=True)
-    t.start()
     uvicorn.run("web:app", host="0.0.0.0", port=PORT, reload=False)
