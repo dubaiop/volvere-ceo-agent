@@ -23,6 +23,8 @@ _jobs: dict[str, dict] = {}
 @app.on_event("startup")
 def startup():
     init_db()
+    from scheduler import start_scheduler
+    start_scheduler()
 
 SKILL_ICONS = {
     "daily-briefing": "sunrise", "decision-support": "git-branch",
@@ -496,6 +498,15 @@ def audit_entry(entry_id: int):
     if not entry:
         raise HTTPException(status_code=404, detail="Entry not found")
     return entry
+
+
+@app.post("/briefing/trigger")
+def trigger_briefing():
+    """Manually trigger the daily briefing."""
+    import threading
+    from scheduler import run_daily_briefing
+    threading.Thread(target=run_daily_briefing, daemon=True).start()
+    return {"status": "briefing triggered", "note": "Generating and sending to Telegram..."}
 
 
 @app.get("/metrics")
