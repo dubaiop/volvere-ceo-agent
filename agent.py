@@ -5,6 +5,7 @@ CEO Agent — core Claude API runner with conversation memory.
 import anthropic
 from config import CLAUDE_MODEL
 from skills.prompts import SKILL_MAP
+from database import log_interaction
 
 _memory: dict[str, list[dict]] = {}
 
@@ -32,9 +33,8 @@ def run_skill(skill_id: str, user_input: str, context: str = "", session_id: str
     )
 
     reply = response.content[0].text
-
     _memory[session_id] = (messages + [{"role": "assistant", "content": reply}])[-20:]
-
+    log_interaction(session_id, skill_id, user_input, reply)
     return reply
 
 
@@ -66,6 +66,7 @@ When you don't know something specific about the user's business, ask — don't 
 
     reply = response.content[0].text
     _memory[session_id] = (messages + [{"role": "assistant", "content": reply}])[-20:]
+    log_interaction(session_id, "chat", user_input, reply)
     return reply
 
 

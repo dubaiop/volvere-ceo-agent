@@ -5,7 +5,7 @@ CEO Agent — FastAPI web dashboard.
 import uuid
 import threading
 from datetime import datetime
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -13,10 +13,16 @@ from typing import Optional
 from config import PORT, COMPANY_NAME, CEO_NAME
 from agent import run_skill, chat, clear_memory
 from skills.prompts import SKILL_MAP
+from database import init_db, log_interaction, get_audit_log, get_metrics, get_audit_entry
 
 app = FastAPI(title=f"{COMPANY_NAME} CEO Agent", version="1.0.0")
 _sessions: dict[str, list] = {}
 _jobs: dict[str, dict] = {}
+
+
+@app.on_event("startup")
+def startup():
+    init_db()
 
 SKILL_ICONS = {
     "daily-briefing": "sunrise", "decision-support": "git-branch",
@@ -149,6 +155,7 @@ def dashboard():
   <a class="logo" href="/"><span class="logo-dot"></span>{COMPANY_NAME} CEO Agent</a>
   <div class="header-right">
     <span class="date-badge">{today}</span>
+    <a href="/audit" style="color:var(--muted2);text-decoration:none;font-size:13px">Audit Trail</a>
     <a href="/docs" style="color:var(--muted2);text-decoration:none;font-size:13px">API Docs</a>
   </div>
 </header>
@@ -316,6 +323,190 @@ def clear_chat(session_id: str):
 @app.get("/health")
 def health():
     return {"status": "ok", "company": COMPANY_NAME}
+
+
+@app.get("/audit", response_class=HTMLResponse)
+def audit_dashboard():
+    logs = get_audit_log(limit=100)
+    metrics = get_metrics()
+    total = metrics.get("total_interactions", 0)
+    decisions = metrics.get("count_decision-support", 0)
+    deals = metrics.get("count_deal-maker", 0)
+    problems = metrics.get("count_problem-solver", 0)
+    briefings = metrics.get("count_daily-briefing", 0)
+    time_saved = total * 25
+
+    skill_counts = {sk: metrics.get(f"count_{sk}", 0) for sk in SKILL_MAP}
+    top_skill = max(skill_counts, key=skill_counts.get) if any(skill_counts.values()) else "—"
+    top_skill_name = SKILL_MAP.get(top_skill, {}).get("name", top_skill)
+
+    rows = ""
+    for entry in logs:
+        skill_label = SKILL_MAP.get(entry["skill_id"], {}).get("name", entry["skill_id"])
+        summary = (entry["input_summary"] or "")[:80]
+        ts = entry["created_at"][:16].replace("T", " ") if entry["created_at"] else "—"
+        rows += f"""
+        <tr onclick="viewEntry({entry['id']})" style="cursor:pointer">
+          <td><span class="skill-tag">{skill_label}</span></td>
+          <td class="muted">{summary}…</td>
+          <td class="muted">{ts}</td>
+          <td><span class="view-link">View →</span></td>
+        </tr>"""
+
+    if not rows:
+        rows = '<tr><td colspan="4" class="muted" style="text-align:center;padding:32px">No interactions yet — start using the agent.</td></tr>'
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Audit Trail — {COMPANY_NAME} CEO Agent</title>
+  <style>
+    *,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
+    :root{{--bg:#080810;--surface:#0f0f1a;--surface2:#161625;--border:#1a1a2e;--border2:#252540;--accent:#7c3aed;--accent2:#a78bfa;--green:#22c55e;--text:#f0f0ff;--muted:#5a5a7a;--muted2:#8888aa;--radius:12px}}
+    body{{font-family:-apple-system,BlinkMacSystemFont,'Inter',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;font-size:14px}}
+    header{{border-bottom:1px solid var(--border);padding:0 40px;height:64px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;background:rgba(8,8,16,.95);backdrop-filter:blur(16px);z-index:100}}
+    .logo{{font-weight:700;font-size:16px;color:var(--text);text-decoration:none;display:flex;align-items:center;gap:10px}}
+    .logo-dot{{width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 12px var(--accent)}}
+    nav a{{color:var(--muted2);text-decoration:none;font-size:13px;margin-left:24px}}
+    nav a:hover{{color:var(--text)}}
+    main{{max-width:1100px;margin:0 auto;padding:40px}}
+    h1{{font-size:28px;font-weight:700;margin-bottom:8px}}
+    .subtitle{{color:var(--muted2);margin-bottom:32px}}
+    .metrics-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:16px;margin-bottom:40px}}
+    .metric-card{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px 24px}}
+    .metric-value{{font-size:32px;font-weight:700}}
+    .metric-label{{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-top:6px}}
+    .metric-sub{{font-size:12px;color:var(--accent2);margin-top:4px}}
+    .section-title{{font-size:13px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin-bottom:16px}}
+    .table-wrap{{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}}
+    table{{width:100%;border-collapse:collapse}}
+    th{{text-align:left;padding:12px 16px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);background:var(--surface2);border-bottom:1px solid var(--border)}}
+    td{{padding:12px 16px;border-bottom:1px solid var(--border);font-size:13px}}
+    tr:last-child td{{border-bottom:none}}
+    tr:hover td{{background:rgba(255,255,255,.02)}}
+    .muted{{color:var(--muted2)}}
+    .skill-tag{{font-size:11px;background:rgba(124,58,237,.1);color:var(--accent2);padding:2px 8px;border-radius:4px;border:1px solid rgba(124,58,237,.2)}}
+    .view-link{{color:var(--accent2);font-size:12px;font-weight:500}}
+    .modal{{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:1000;align-items:center;justify-content:center;padding:20px}}
+    .modal.open{{display:flex}}
+    .modal-box{{background:var(--surface);border:1px solid var(--border2);border-radius:var(--radius);max-width:700px;width:100%;max-height:80vh;overflow:hidden;display:flex;flex-direction:column}}
+    .modal-header{{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;background:var(--surface2)}}
+    .modal-body{{padding:20px;overflow-y:auto;flex:1}}
+    .modal-close{{cursor:pointer;color:var(--muted2);font-size:18px;background:none;border:none;color:var(--text)}}
+    .output-box{{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;font-size:13px;line-height:1.7;white-space:pre-wrap;color:var(--text);max-height:400px;overflow-y:auto}}
+    .input-box{{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-size:13px;color:var(--muted2);white-space:pre-wrap;margin-bottom:12px}}
+    .label{{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:6px}}
+  </style>
+</head>
+<body>
+<header>
+  <a class="logo" href="/"><span class="logo-dot"></span>{COMPANY_NAME} CEO Agent</a>
+  <nav>
+    <a href="/">Dashboard</a>
+    <a href="/audit">Audit Trail</a>
+    <a href="/docs">API</a>
+  </nav>
+</header>
+<main>
+  <h1>Audit Trail</h1>
+  <p class="subtitle">Every AI-assisted decision, recommendation, and analysis — logged and reviewable.</p>
+
+  <div class="metrics-grid">
+    <div class="metric-card">
+      <div class="metric-value">{total}</div>
+      <div class="metric-label">Total Interactions</div>
+      <div class="metric-sub">All time</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value">~{time_saved}m</div>
+      <div class="metric-label">Time Saved</div>
+      <div class="metric-sub">Est. 25 min per task</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value">{decisions}</div>
+      <div class="metric-label">Decisions Supported</div>
+      <div class="metric-sub">decision-support skill</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value">{deals}</div>
+      <div class="metric-label">Deals Structured</div>
+      <div class="metric-sub">deal-maker skill</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value">{problems}</div>
+      <div class="metric-label">Problems Solved</div>
+      <div class="metric-sub">problem-solver skill</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value">{top_skill_name.split(' ')[0]}</div>
+      <div class="metric-label">Most Used Skill</div>
+      <div class="metric-sub">{skill_counts.get(top_skill, 0)} uses</div>
+    </div>
+  </div>
+
+  <div class="section-title">Interaction Log</div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Skill</th><th>Input Summary</th><th>Timestamp</th><th></th></tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
+</main>
+
+<div class="modal" id="modal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span id="modalTitle">Interaction Detail</span>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="label">Input</div>
+      <div class="input-box" id="modalInput"></div>
+      <div class="label">AI Response</div>
+      <div class="output-box" id="modalOutput"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+async function viewEntry(id) {{
+  const resp = await fetch('/audit/' + id);
+  const data = await resp.json();
+  document.getElementById('modalTitle').textContent = data.skill_id + ' — ' + (data.created_at || '').slice(0,16);
+  document.getElementById('modalInput').textContent = data.input_summary || '—';
+  document.getElementById('modalOutput').textContent = data.output || '—';
+  document.getElementById('modal').classList.add('open');
+}}
+function closeModal() {{ document.getElementById('modal').classList.remove('open'); }}
+document.getElementById('modal').addEventListener('click', e => {{ if(e.target === e.currentTarget) closeModal(); }});
+</script>
+</body>
+</html>"""
+
+
+@app.get("/audit/data")
+def audit_data(limit: int = Query(50), skill_id: str = Query(None)):
+    return get_audit_log(limit=limit, skill_id=skill_id)
+
+
+@app.get("/audit/{entry_id}")
+def audit_entry(entry_id: int):
+    entry = get_audit_entry(entry_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Entry not found")
+    return entry
+
+
+@app.get("/metrics")
+def metrics():
+    m = get_metrics()
+    total = m.get("total_interactions", 0)
+    return {
+        "total_interactions": total,
+        "estimated_minutes_saved": total * 25,
+        "by_skill": {sk: m.get(f"count_{sk}", 0) for sk in SKILL_MAP},
+    }
 
 
 def start_telegram():
